@@ -1,0 +1,2 @@
+boto3==1.35.0
+# psycopg v3 is provided by psycopg3-python314-x86 Lambda Layer

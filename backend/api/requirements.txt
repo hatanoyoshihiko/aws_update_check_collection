@@ -1,0 +1,2 @@
+# boto3 is provided by SharedLayer
+# psycopg v3 is provided by psycopg3-python314-x86 Lambda Layer

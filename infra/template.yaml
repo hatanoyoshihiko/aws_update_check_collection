@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: AWS Update Check Collection
+
+# ---------------------------------------------------------------
+# パラメータ
+# ---------------------------------------------------------------
+Parameters:
+  DsqlEndpoint:
+    Type: String
+    Description: Aurora DSQL (e.g. xxx.dsql.us-east-1.on.aws)
+
+  DsqlRegion:
+    Type: String
+    Default: ap-northeast-1
+    Description: Aurora DSQL Region
+
+  DsqlDatabase:
+    Type: String
+    Default: postgres
+
+  BedrockRegion:
+    Type: String
+    Default: ap-northeast-1
+    Description: Amazon Bedrock Region
+
+  BedrockModelId:
+    Type: String
+    Default: jp.anthropic.claude-sonnet-4-6
+
+  BackfillDays:
+    Type: Number
+    Default: 1
+    Description: 収集対象の日数 (初回バックフィル時は 30 を指定)
+
+  StageName:
+    Type: String
+    Default: prod
+
+  DsqlClusterId:
+    Type: String
+    Default: ""
+    Description: Aurora DSQL cluster identifier. Used to scope IAM policy. Leave empty to allow all clusters (not recommended for production).
+
+  CustomDomain:
+    Type: String
+    Default: ""
+    Description: Custom domain for CloudFront (e.g. example.com). Leave empty to use the CloudFront default domain.
+
+  AcmCertificateArn:
+    Type: String
+    Default: ""
+    Description: ACM certificate ARN in us-east-1 for the custom domain. Required when CustomDomain is set.
+
+
+# ---------------------------------------------------------------
+# 条件
+# ---------------------------------------------------------------
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomain, ""]]
+  HasDsqlClusterId: !Not [!Equals [!Ref DsqlClusterId, ""]]
+
+
+# ---------------------------------------------------------------
+# グローバル設定
+# ---------------------------------------------------------------
+Globals:
+  Function:
+    Runtime: python3.14
+    Architectures:
+      - x86_64
+    Timeout: 60
+    MemorySize: 256
+    Layers:
+      - arn:aws:lambda:ap-northeast-1:244573972125:layer:psycopg3-python314-x86:1
+      - !Ref SharedLayer
+    Environment:
+      Variables:
+        DSQL_ENDPOINT: !Ref DsqlEndpoint
+        DSQL_REGION: !Ref DsqlRegion
+        DSQL_DATABASE: !Ref DsqlDatabase
+        BEDROCK_REGION: !Ref BedrockRegion
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+
+
+# ---------------------------------------------------------------
+# リソース
+# ---------------------------------------------------------------
+Resources:
+
+  # ---- Shared Lambda Layer ----
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: aws-update-shared
+      ContentUri: ../backend/shared/
+      CompatibleRuntimes:
+        - python3.14
+      CompatibleArchitectures:
+        - x86_64
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: python3.14
+
+  # ---- Crawler Lambda ----
+  CrawlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aws-update-crawler
+      CodeUri: ../backend/crawler/
+      Handler: handler.lambda_handler
+      Description: AWS What's New RSS を収集し Bedrock で要約・活用例を生成して DSQL に保存する
+      Environment:
+        Variables:
+          BACKFILL_DAYS: !Ref BackfillDays
+      Events:
+        DailySchedule:
+          Type: ScheduleV2
+          Properties:
+            Name: aws-update-daily-collect
+            ScheduleExpression: "cron(0 */6 * * ? *)"  # 6hごとに実行
+            ScheduleExpressionTimezone: UTC
+            State: ENABLED
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub "arn:aws:bedrock:${BedrockRegion}::foundation-model/${BedrockModelId}"
+            - Effect: Allow
+              Action:
+                - dsql:DbConnectAdmin
+              Resource: !If
+                - HasDsqlClusterId
+                - !Sub "arn:aws:dsql:${DsqlRegion}:${AWS::AccountId}:cluster/${DsqlClusterId}"
+                - !Sub "arn:aws:dsql:${DsqlRegion}:${AWS::AccountId}:cluster/*"
+
+  # ---- Get and response AWS update list Lambda----
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: aws-update-api
+      CodeUri: ../backend/api/
+      Handler: handler.lambda_handler
+      Description: Get and response AWS update list api
+      Environment:
+        Variables:
+          ALLOWED_ORIGIN: !If
+            - HasCustomDomain
+            - !Sub "https://${CustomDomain}"
+            - "*"
+      Events:
+        ListUpdates:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /updates
+            Method: GET
+        GetUpdate:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /updates/{id}
+            Method: GET
+        ListCategories:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RestApi
+            Path: /categories
+            Method: GET
+      Policies:
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - dsql:DbConnectAdmin
+              Resource: !If
+                - HasDsqlClusterId
+                - !Sub "arn:aws:dsql:${DsqlRegion}:${AWS::AccountId}:cluster/${DsqlClusterId}"
+                - !Sub "arn:aws:dsql:${DsqlRegion}:${AWS::AccountId}:cluster/*"
+
+  # ---- API Gateway ----
+  RestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: aws-update-api
+      StageName: !Ref StageName
+      Cors:
+        AllowMethods: "'GET,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: !If
+          - HasCustomDomain
+          - !Sub "'https://${CustomDomain}'"
+          - "'*'"
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+      GatewayResponses:
+        DEFAULT_4XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !If
+                - HasCustomDomain
+                - !Sub "'https://${CustomDomain}'"
+                - "'*'"
+              Access-Control-Allow-Headers: "'Content-Type'"
+        DEFAULT_5XX:
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: !If
+                - HasCustomDomain
+                - !Sub "'https://${CustomDomain}'"
+                - "'*'"
+              Access-Control-Allow-Headers: "'Content-Type'"
+
+  # ---- S3 バケット (フロントエンド) ----
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "aws-update-collection-frontend-${AWS::AccountId}"
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # OAC (CloudFront → S3)
+  FrontendOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: aws-update-frontend-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # S3 バケットポリシー (CloudFront からのアクセスのみ許可)
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${FrontendBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}"
+
+  # ---- CloudFront ----
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        DefaultRootObject: index.html
+        Aliases: !If
+          - HasCustomDomain
+          - - !Ref CustomDomain
+          - !Ref AWS::NoValue
+        ViewerCertificate: !If
+          - HasCustomDomain
+          - AcmCertificateArn: !Ref AcmCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt FrontendOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6  # CachingOptimized
+          AllowedMethods: [GET, HEAD]
+        # SPA のルーティング: 404 → index.html にフォールバック
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        PriceClass: PriceClass_200
+
+# ---------------------------------------------------------------
+# 出力
+# ---------------------------------------------------------------
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway Endpoint
+    Value: !Sub "https://${RestApi}.execute-api.${AWS::Region}.amazonaws.com/${StageName}"
+
+  CloudFrontDomain:
+    Description: CloudFront Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+
+  FrontendBucketName:
+    Description: Frontend S3Bucket Name
+    Value: !Ref FrontendBucket
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
