@@ -128,7 +128,7 @@ aws_update_check_collection/
 
 | リソース | 詳細 |
 |---|---|
-| Crawler Lambda | Runtime: , Architecture: x86_64, Timeout: 900秒 |
+| Crawler Lambda | Runtime: python3.14, Architecture: x86_64, Timeout: 60秒 |
 | API Lambda | Runtime: , Architecture: x86_64 |
 | Lambda Layer (psycopg3) | psycopg v3 (psycopg3-python314-x86) — Aurora DSQL 接続用 |
 | Lambda Layer (SharedLayer) | boto3 + db_connection — 両 Lambda 共通モジュール（SAM 自動ビルド） |
@@ -158,7 +158,7 @@ VITE_API_BASE_URL=https://<api-id>.execute-api.ap-northeast-1.amazonaws.com/prod
 
 - **Aurora DSQL**: `CREATE INDEX ASYNC` 構文が必要（`DESC` インデックスは非対応）
 - **Bedrock モデル**: `jp.anthropic.claude-sonnet-4-6` はクロスリージョン推論プロファイルのため、IAM ポリシーの `Resource` は `*` または `inference-profile/` ARN 形式が必要
-- **Lambda タイムアウト**: Crawler は最大900秒（記事数が多い場合に対応）
+- **Lambda タイムアウト**: 全 Lambda 共通で 60秒（`template.yaml` の `Globals.Function.Timeout` で設定）
 - **CORS**: カスタムドメイン設定時はそのオリジンのみ許可。未設定時は全オリジン許可（公開読み取り専用 API のため）
 - **レート制限**: API Gateway は 50 req/s（バースト 100）に制限。超過時は `429 Too Many Requests` を返す
 - **検索クエリ文字数**: `q`（キーワード検索）は最大 200 文字、`category` は最大 100 文字
