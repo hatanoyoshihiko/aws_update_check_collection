@@ -94,11 +94,22 @@ API_ENDPOINT=$(aws cloudformation describe-stacks \
   --query "Stacks[0].Outputs[?OutputKey=='ApiEndpoint'].OutputValue" \
   --output text)
 
+CF_DIST_ID=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='CloudFrontDistributionId'].OutputValue" \
+  --output text)
+
 echo "=== [4/4] フロントエンドをS3にアップロード ==="
 pushd "$(dirname "$0")/../frontend" >/dev/null
 VITE_API_BASE_URL="$API_ENDPOINT" pnpm build
 aws s3 sync dist/ "s3://${BUCKET}/" --delete
 popd >/dev/null
+
+echo "=== CloudFront キャッシュ削除 ==="
+aws cloudfront create-invalidation \
+  --distribution-id "$CF_DIST_ID" \
+  --paths "/*"
 
 if [[ -n "$CUSTOM_DOMAIN" ]]; then
   FRONTEND_URL="https://${CUSTOM_DOMAIN}"
