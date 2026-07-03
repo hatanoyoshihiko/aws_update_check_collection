@@ -22,6 +22,19 @@ export function UpdateList({
 }: Props) {
   const totalPages = Math.ceil(total / limit);
 
+  const maxVisible = 7;
+  const half = Math.floor(maxVisible / 2);
+  let startPage = Math.max(1, page - half);
+  let endPage = startPage + maxVisible - 1;
+  if (endPage > totalPages) {
+    endPage = totalPages;
+    startPage = Math.max(1, endPage - maxVisible + 1);
+  }
+  const pageNumbers = Array.from(
+    { length: endPage - startPage + 1 },
+    (_, i) => startPage + i
+  );
+
   if (loading) {
     return (
       <div className="flex justify-center py-20 text-gray-400 text-sm">
@@ -60,22 +73,19 @@ export function UpdateList({
           >
             ← 前へ
           </button>
-          {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
-            const p = i + 1;
-            return (
-              <button
-                key={p}
-                onClick={() => onPageChange(p)}
-                className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                  p === page
-                    ? "bg-orange-500 text-white border-orange-500"
-                    : "border-gray-300 hover:bg-gray-100"
-                }`}
-              >
-                {p}
-              </button>
-            );
-          })}
+          {pageNumbers.map((p) => (
+            <button
+              key={p}
+              onClick={() => onPageChange(p)}
+              className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
+                p === page
+                  ? "bg-orange-500 text-white border-orange-500"
+                  : "border-gray-300 hover:bg-gray-100"
+              }`}
+            >
+              {p}
+            </button>
+          ))}
           <button
             onClick={() => onPageChange(page + 1)}
             disabled={page >= totalPages}
